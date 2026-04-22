@@ -528,7 +528,7 @@ class ReedScraper:
         with open(f'{self.json_filename}', 'w') as f:
             json.dump(data, f, indent=4)
     def _send_to_pipeline(self):
-            webhook_url = "https://primary-production-dacdb.up.railway.app/webhook/reed"
+            webhook_url = os.environ.get("N8N_WEBHOOK_REED", "https://primary-production-dacdb.up.railway.app/webhook/reed")
             all_jobs=[]
             for item in zip(self.job_title_jones, self.job_company_jones, self.job_location_jones, self.job_url_jones, 
                             self.job_skills_jones, self.job_salary_jones, self.remote_work_jones, self.job_schedule_jones):

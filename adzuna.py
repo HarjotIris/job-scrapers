@@ -541,7 +541,7 @@ class AdzunaScraper:
             print(f'Created {excel_filename} with {len(new_df)} jobs')
 
     def _send_to_pipeline(self):
-            webhook_url = "https://primary-production-dacdb.up.railway.app/webhook/adzuna"
+            webhook_url = os.environ.get("N8N_WEBHOOK_ADZUNA", "https://primary-production-dacdb.up.railway.app/webhook/adzuna")
             all_jobs=[]
             for item in zip(self.titles, self.companies, self.locations, self.urls, 
                             self.job_skills, self.salary, self.work_from_home, self.schedule):

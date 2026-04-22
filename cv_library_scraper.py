@@ -473,7 +473,8 @@ class CVScraper:
         
     
     def _send_to_pipeline(self):
-            webhook_url = "https://primary-production-dacdb.up.railway.app/webhook/cv-library"
+            import os
+            webhook_url = os.environ.get("N8N_WEBHOOK_CV", "https://primary-production-dacdb.up.railway.app/webhook/cv-library")
             all_jobs=[]
             for item in zip(self.titles, self.companies, self.locations, self.urls, 
                             self.job_skills, self.salary, self.work_from_home, self.schedule):

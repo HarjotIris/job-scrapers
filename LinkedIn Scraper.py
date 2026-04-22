@@ -609,7 +609,7 @@ class LinkedInScraper:
         print(f"Saved to {json_filename}")
 
     def _send_to_pipeline(self):
-            webhook_url = "https://primary-production-dacdb.up.railway.app/webhook/linkedin"
+            webhook_url = os.environ.get("N8N_WEBHOOK_LINKEDIN", "https://primary-production-dacdb.up.railway.app/webhook/linkedin")
             all_jobs=[]
             for item in zip(self.titles, self.companies, self.locations, self.urls, 
                             self.job_skills, self.salary, self.work_from_home, self.schedule):

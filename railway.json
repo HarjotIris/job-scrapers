@@ -1,0 +1,8 @@
+{
+  "build": {
+    "builder": "NIXPACKS"
+  },
+  "cron": {
+    "schedule": "0 9 * * *"
+  }
+}
