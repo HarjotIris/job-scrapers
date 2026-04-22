@@ -1,0 +1,47 @@
+name: Scrape Jobs Daily
+
+on:
+  schedule:
+    - cron: '0 9 * * *'  # Runs at 9 AM every day
+  workflow_dispatch:  # Allows manual run from GitHub
+
+jobs:
+  scrape-reed:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install requests beautifulsoup4 pandas openpyxl
+      - run: python reed_scraper.py --job_keyword AI --number_of_pages 10 --format all 
+
+  scrape-linkedin:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install requests beautifulsoup4 pandas openpyxl
+      - run: python linkedin_scraper.py --job_keyword AI --format all     
+
+  scrape-cv-library:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install requests beautifulsoup4 pandas openpyxl
+      - run: python cv_library_scraper.py --job_keyword AI --number_of_pages 10 --format all
+
+  scrape-adzuna:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install requests beautifulsoup4 pandas openpyxl
+      - run: python adzuna_scraper.py 
