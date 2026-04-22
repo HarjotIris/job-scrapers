@@ -1,0 +1,706 @@
+from selenium import webdriver
+import re, unicodedata, json, pandas as pd, os
+from selenium.webdriver.common.by import By
+from selenium.webdriver.firefox.options import Options
+from selenium.common.exceptions import NoSuchElementException
+import time
+import numpy as np
+from functools import wraps
+from collections import defaultdict
+from datetime import datetime, timedelta
+import argparse
+import requests
+from selenium.webdriver.common.keys import Keys
+options = Options()
+options.add_argument("--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36")
+script_dir = os.path.dirname(os.path.abspath(__file__))
+os.chdir(script_dir)
+
+class LinkedInScraper:
+    def __init__(self, output_filename = 'linkedIn_jobs', format = 'all'):
+        self.titles = []
+        self.companies = []
+        self.urls = []
+        self.job_description= []
+        self.job_skills = []
+        self.output_filename = output_filename
+        #self.json_filename = ''
+        self.format = format.lower()
+        self.job_title_short = []
+        self.locations = []
+        self.salary = []
+        self.degree = []
+        self.health_insurance = []
+        self.work_from_home = []
+        self.schedule = []
+        self.salary_rate = []
+
+    def normalize(self, text):
+        return re.sub(r'[^a-z0-9]', '', text.lower().strip())
+
+    def clean_text(self, text):
+        """Clean text of problematic characters and encoding issues"""
+        if not text:
+            return ""
+        
+        text = unicodedata.normalize('NFKD', text)
+        text = text.replace('\u00a0', ' ')
+        text = text.replace('\u2013', '-')
+        text = text.replace('\u2014', '-')
+        text = text.replace('\u2018', "'")
+        text = text.replace('\u2019', "'")
+        text = text.replace('\u201c', '"')
+        text = text.replace('\u201d', '"')
+        text = text.replace('\u00e9', 'e')
+        text = text.replace('\u00f1', 'n')
+        text = ''.join(char for char in text if char.isprintable() or char in ['\n', '\t'])
+        
+        return text.strip()
+    
+    def _extract_degree(self, job_description):
+        degree_list = ['bachelor\'s', 'master\'s', 'bachelors', 'masters']
+        vague_list = ['relevant degree', 'degree']
+        jd_lower = job_description.lower()
+        
+        for degree in degree_list:
+            if degree in jd_lower:
+                return degree
+        for val in vague_list:
+            if val in jd_lower:
+                return 'degree mentioned vaguely'
+        return 'No degree mentioned'
+    
+    def _extract_job_health_insurance_info(self, job_description):
+        jd_lower = job_description.lower()
+        return 'True' if 'health insurance' in jd_lower else 'False'
+    
+    def _extract_job_work_from_home(self, job_description):
+        jd_lower = job_description.lower()
+        
+        return 'True' if 'remote' in jd_lower or 'hybrid' in jd_lower else 'False'
+    
+    def _salary_rate(self, salary):
+            if 'annum' in salary or 'year' in salary:
+                return 'yearly'
+            elif 'hour' in salary or 'hourly' in salary:
+                return 'hourly'
+            else:
+                return 'Not applicable'
+   
+    def _extract_skills(self, job_description):
+        """Extract common skills from job description"""
+        skills_list = [
+            'python', 'java', 'javascript', 'sql', 'c++', 'c#', 'php', 'ruby', 'swift',
+            'excel', 'powerbi', 'tableau', 'power bi', 'looker', 'qlik',
+            'pandas', 'numpy', 'scikit-learn', 'tensorflow', 'pytorch', 'keras',
+            'machine learning', 'deep learning', 'data analysis', 'data analytics', 
+            'statistical analysis', 'data visualization', 'data mining',
+            'aws', 'azure', 'gcp', 'google cloud', 'docker', 'kubernetes',
+            'spark', 'hadoop', 'hive', 'kafka', 'airflow',
+            'git', 'github', 'gitlab', 'jira', 'agile', 'scrum',
+            'etl', 'data warehousing', 'data modeling', 'database',
+            'mysql', 'postgresql', 'mongodb', 'oracle', 'sql server',
+            'api', 'rest', 'json', 'xml', 'html', 'css',
+            'communication', 'teamwork', 'problem solving', 'analytical'
+        ]
+        
+        found_skills = []
+        jd_lower = job_description.lower()
+        
+        for skill in skills_list:
+            if skill in jd_lower:
+                found_skills.append(skill)
+        
+        return ', '.join(found_skills) if found_skills else 'N/A'
+
+    def _categorize_job_title(self, job_title):
+        """
+        Categorize job title into standardized short titles
+        Uses keyword matching with priority order (specific → general → catch-all)
+        """
+        title_lower = job_title.lower()
+        
+        # Define categories with their keywords (order matters - check specific first!)
+        categories = [
+            # ========== SENIOR POSITIONS (Most Specific First) ==========
+            
+            # Senior Machine Learning
+            ('Senior Machine Learning Engineer', ['senior', 'machine learning', 'engineer']),
+            ('Senior Machine Learning Engineer', ['senior', 'ml', 'engineer']),
+            ('Senior Machine Learning Engineer', ['senior', 'machine learning', 'scientist']),
+            ('Senior Machine Learning Engineer', ['senior', 'mlops']),
+            
+            # Senior Data Science
+            ('Senior Data Scientist', ['senior', 'data scientist']),
+            ('Senior Data Scientist', ['senior', 'data science']),
+            ('Senior Data Scientist', ['senior', 'applied', 'scientist']),
+            ('Senior Data Scientist', ['senior', 'research', 'data']),
+            
+            # Senior Data Engineering
+            ('Senior Data Engineer', ['senior', 'data engineer']),
+            ('Senior Data Engineer', ['senior', 'data engineering']),
+            ('Senior Data Engineer', ['senior', 'analytics', 'engineer']),
+            ('Senior Data Engineer', ['senior', 'etl', 'engineer']),
+            ('Senior Data Engineer', ['senior', 'data platform', 'engineer']),
+            ('Senior Data Engineer', ['senior', 'data pipeline', 'engineer']),
+            
+            # Senior Data Analyst - ALL VARIATIONS
+            ('Senior Data Analyst', ['senior', 'data analyst']),
+            ('Senior Data Analyst', ['senior', 'data quality', 'analyst']),
+            ('Senior Data Analyst', ['senior', 'data governance', 'analyst']),
+            ('Senior Data Analyst', ['senior', 'category data', 'analyst']),
+            ('Senior Data Analyst', ['senior', 'data strategy', 'analyst']),
+            ('Senior Data Analyst', ['senior', 'analytics', 'analyst']),
+            ('Senior Data Analyst', ['senior', 'data insights', 'analyst']),
+            ('Senior Data Analyst', ['senior', 'data operations', 'analyst']),
+            ('Senior Data Analyst', ['senior', 'marketing', 'data', 'analyst']),
+            ('Senior Data Analyst', ['senior', 'financial', 'data', 'analyst']),
+            ('Senior Data Analyst', ['senior', 'product', 'data', 'analyst']),
+            ('Senior Data Analyst', ['senior', 'customer', 'data', 'analyst']),
+            ('Senior Data Analyst', ['senior', 'sales', 'data', 'analyst']),
+            ('Senior Data Analyst', ['senior', 'business', 'data', 'analyst']),
+            ('Senior Data Analyst', ['senior', 'data reporting', 'analyst']),
+            ('Senior Data Analyst', ['senior', 'data visualization', 'analyst']),
+            
+            # Senior Business Intelligence
+            ('Senior Business Analyst', ['senior', 'business intelligence', 'analyst']),
+            ('Senior Business Analyst', ['senior', 'bi analyst']),
+            ('Senior Business Analyst', ['senior', 'business analyst']),
+            ('Senior Business Analyst', ['senior', 'business systems', 'analyst']),
+            
+            # Senior Software Engineering
+            ('Senior Software Engineer', ['senior', 'software', 'engineer']),
+            ('Senior Software Engineer', ['senior', 'software', 'developer']),
+            ('Senior Software Engineer', ['senior', 'backend', 'engineer']),
+            ('Senior Software Engineer', ['senior', 'frontend', 'engineer']),
+            ('Senior Software Engineer', ['senior', 'full stack']),
+            ('Senior Software Engineer', ['senior', 'developer']),
+            
+            # ========== LEAD/PRINCIPAL/STAFF POSITIONS ==========
+            
+            ('Lead Data Scientist', ['lead', 'data scientist']),
+            ('Lead Data Scientist', ['staff', 'data scientist']),
+            ('Lead Data Engineer', ['lead', 'data engineer']),
+            ('Lead Data Engineer', ['staff', 'data engineer']),
+            ('Principal Data Scientist', ['principal', 'data scientist']),
+            ('Principal Data Scientist', ['principal', 'scientist']),
+            ('Lead Machine Learning Engineer', ['lead', 'machine learning']),
+            ('Lead Machine Learning Engineer', ['lead', 'ml', 'engineer']),
+            
+            # ========== MACHINE LEARNING ROLES ==========
+            
+            ('Machine Learning Engineer', ['machine learning', 'engineer']),
+            ('Machine Learning Engineer', ['ml', 'engineer']),
+            ('Machine Learning Engineer', ['machine learning', 'scientist']),
+            ('Machine Learning Engineer', ['mlops', 'engineer']),
+            ('Machine Learning Engineer', ['deep learning', 'engineer']),
+            ('AI Engineer', ['ai', 'engineer']),
+            ('AI Engineer', ['artificial intelligence', 'engineer']),
+            ('AI Engineer', ['ai/ml']),
+            
+            # ========== DATA SCIENCE ROLES ==========
+            
+            ('Data Scientist', ['data scientist']),
+            ('Data Scientist', ['data science']),
+            ('Data Scientist', ['applied', 'scientist']),
+            ('Research Scientist', ['research', 'scientist']),
+            ('Research Scientist', ['research', 'data']),
+            
+            # ========== DATA ENGINEERING ROLES ==========
+            
+            ('Data Engineer', ['data engineer']),
+            ('Data Engineer', ['data engineering']),
+            ('Data Engineer', ['etl', 'engineer']),
+            ('Data Engineer', ['data platform', 'engineer']),
+            ('Data Engineer', ['data pipeline', 'engineer']),
+            ('Data Engineer', ['data warehouse', 'engineer']),
+            ('Analytics Engineer', ['analytics', 'engineer']),
+            ('Analytics Engineer', ['analytics engineering']),
+            
+            # ========== DATA ANALYSIS ROLES - ALL VARIATIONS ==========
+            
+            ('Data Analyst', ['data analyst']),
+            ('Data Analyst', ['data quality', 'analyst']),
+            ('Data Analyst', ['data governance', 'analyst']),
+            ('Data Analyst', ['category data', 'analyst']),
+            ('Data Analyst', ['data strategy', 'analyst']),
+            ('Data Analyst', ['analytics', 'analyst']),
+            ('Data Analyst', ['data insights', 'analyst']),
+            ('Data Analyst', ['data operations', 'analyst']),
+            ('Data Analyst', ['marketing', 'data', 'analyst']),
+            ('Data Analyst', ['financial', 'data', 'analyst']),
+            ('Data Analyst', ['product', 'data', 'analyst']),
+            ('Data Analyst', ['customer', 'data', 'analyst']),
+            ('Data Analyst', ['sales', 'data', 'analyst']),
+            ('Data Analyst', ['business', 'data', 'analyst']),
+            ('Data Analyst', ['data reporting', 'analyst']),
+            ('Data Analyst', ['data visualization', 'analyst']),
+            ('Data Analyst', ['data analytics']),
+            
+            # Business Intelligence
+            ('Business Intelligence Analyst', ['business intelligence', 'analyst']),
+            ('Business Intelligence Analyst', ['bi analyst']),
+            ('Business Intelligence Analyst', ['business intelligence']),
+            ('Business Intelligence Analyst', ['bi developer']),
+            
+            # ========== BUSINESS ANALYST ROLES ==========
+            
+            ('Business Analyst', ['business analyst']),
+            ('Business Analyst', ['business systems', 'analyst']),
+            ('Business Analyst', ['functional', 'analyst']),
+            ('Business Analyst', ['process', 'analyst']),
+            
+            # ========== QUANTITATIVE ROLES ==========
+            
+            ('Quantitative Analyst', ['quantitative', 'analyst']),
+            ('Quantitative Analyst', ['quant', 'analyst']),
+            ('Quantitative Analyst', ['quantitative', 'researcher']),
+            ('Quantitative Analyst', ['quant', 'developer']),
+            
+            # ========== SOFTWARE ENGINEERING ROLES ==========
+            
+            ('Software Engineer', ['software', 'engineer']),
+            ('Software Engineer', ['software', 'developer']),
+            ('Backend Engineer', ['backend', 'engineer']),
+            ('Backend Engineer', ['back-end', 'engineer']),
+            ('Frontend Engineer', ['frontend', 'engineer']),
+            ('Frontend Engineer', ['front-end', 'engineer']),
+            ('Full Stack Engineer', ['full stack']),
+            ('Full Stack Engineer', ['fullstack']),
+            ('DevOps Engineer', ['devops']),
+            ('DevOps Engineer', ['dev ops']),
+            ('DevOps Engineer', ['site reliability', 'engineer']),
+            ('DevOps Engineer', ['sre']),
+            
+            # ========== CLOUD ROLES ==========
+            
+            ('Cloud Engineer', ['cloud', 'engineer']),
+            ('Cloud Engineer', ['cloud', 'developer']),
+            ('Cloud Architect', ['cloud', 'architect']),
+            ('Cloud Architect', ['solutions', 'architect', 'cloud']),
+            
+            # ========== ARCHITECT ROLES ==========
+            
+            ('Data Architect', ['data', 'architect']),
+            ('Solutions Architect', ['solutions', 'architect']),
+            ('Enterprise Architect', ['enterprise', 'architect']),
+            
+            # ========== CATCH-ALL PATTERNS (Ordered by Priority) ==========
+            # These catch anything we missed with specific patterns
+            
+            # Catch any Senior + Data + Analyst combination
+            ('Senior Data Analyst', ['senior', 'data', 'analyst']),
+            
+            # Catch any Senior + Data + Engineer combination
+            ('Senior Data Engineer', ['senior', 'data', 'engineer']),
+            
+            # Catch any Senior + Data + Scientist combination
+            ('Senior Data Scientist', ['senior', 'data', 'scientist']),
+            
+            # Catch any Senior + ML/Machine Learning combination
+            ('Senior Machine Learning Engineer', ['senior', 'machine', 'learning']),
+            ('Senior Machine Learning Engineer', ['senior', 'ml']),
+            
+            # Catch any Senior + Software/Developer combination
+            ('Senior Software Engineer', ['senior', 'software']),
+            ('Senior Software Engineer', ['senior', 'engineer']),
+            
+
+            # ========== OTHER ANALYST TYPES (Add before final catch-all) ==========
+
+            ('Financial Analyst', ['financial', 'analyst']),
+            ('Financial Analyst', ['finance', 'analyst']),
+            ('Risk Analyst', ['risk', 'analyst']),
+            ('Operations Analyst', ['operations', 'analyst']),
+            ('Junior Analyst', ['junior', 'analyst']),
+
+            # Catch any Data + Analyst combination (non-senior)
+            ('Data Analyst', ['data', 'analyst']),
+
+            # Generic analyst (for anything that doesn't fit above)
+            ('Analyst', ['analyst']),
+            
+            # Catch any Data + Engineer combination (non-senior)
+            ('Data Engineer', ['data', 'engineer']),
+            
+            # Catch any Data + Scientist combination (non-senior)
+            ('Data Scientist', ['data', 'scientist']),
+            
+            # Catch any ML/Machine Learning Engineer (non-senior)
+            ('Machine Learning Engineer', ['machine', 'learning']),
+            ('Machine Learning Engineer', ['ml']),
+            
+            # Catch any AI-related roles
+            ('AI Engineer', ['ai']),
+            ('AI Engineer', ['artificial', 'intelligence']),
+            
+            # Catch any Business Analyst variations
+            ('Business Analyst', ['business', 'analyst']),
+            
+            # Catch any Software Engineer variations
+            ('Software Engineer', ['software']),
+            ('Software Engineer', ['developer']),
+            ('Software Engineer', ['engineer']),
+        ]
+        
+        # Check each category
+        for category_name, keywords in categories:
+            # Check if ALL keywords are in the title
+            if all(keyword in title_lower for keyword in keywords):
+                return category_name
+        
+        # If no match found, return "Other"
+        return 'Other'
+    
+    def clear_data(self):
+        self.titles = []
+        self.companies = []
+        self.urls = []
+        self.job_description = []
+        self.job_skills = []
+        self.job_title_short = []
+        self.locations = []
+        self.salary = []
+        self.schedule = []
+        self.salary_rate = []
+    
+    def _shortening_titles(self):
+        for title in self.titles:
+            self.job_title_short.append(self._categorize_job_title(title))
+
+    def scrape_jobs(self, job_keyword):
+        self.clear_data()  # ADD THIS LINE
+        seen_jobs = set()
+        browser = webdriver.Firefox(options=options)
+        # geoId is fixed here for london area, can change for other places
+        url = f'https://www.linkedin.com/jobs/search/?geoId=90009496&keywords={job_keyword}&originalSubdomain=uk&refresh=true&start=0'
+
+
+        browser.get(url)
+
+        # job title, url, company, location
+        time.sleep(np.random.uniform(3, 5))
+
+        # getting rid of pop ups
+        for i in range(2):
+            browser.find_element(By.TAG_NAME, 'body').send_keys(Keys.ESCAPE)
+            time.sleep(np.random.uniform(3, 5))
+
+        # refreshing to load the full page
+        browser.refresh()
+
+        # scroll function to load all jobs
+        def scroll_until_button_visible(browser, max_scrolls=50):
+            """Scroll down until 'See more jobs' button is visible"""
+            for i in range(max_scrolls):
+                try:
+                    # Try to find the button
+                    button = browser.find_element(By.CSS_SELECTOR, "button[aria-label='See more jobs']")
+                    
+                    # Check if button is visible
+                    if button.is_displayed():
+                        print(f"Button found after {i} scrolls")
+                        return button
+                except NoSuchElementException:
+                    pass
+                
+                # Scroll down
+                browser.execute_script("window.scrollBy(0, 1000);")
+                time.sleep(np.random.uniform(0.5, 1.5))  # Random delay to appear human-like
+            
+            print("Max scrolls reached, button not found")
+            return None
+        
+        # Scroll until button is visible
+        see_more_button = scroll_until_button_visible(browser)
+
+        for i in range(1): # can do more than 10 if you want more jobs, this was approx 180 jobs, there were 9k total and we will get there, believe
+            if see_more_button:
+                # Click the button if you want to load more jobs
+                see_more_button.click()
+                time.sleep(2)
+
+        try:
+            textelem = browser.find_elements(By.CSS_SELECTOR, 'h3.base-search-card__title')
+
+            for elem in textelem:
+                self.titles.append(elem.text)
+                
+        except:
+            textelem = []
+
+        try:
+            companyelem = browser.find_elements(By.CSS_SELECTOR, 'h4.base-search-card__subtitle')
+
+            for elem in companyelem:
+                self.companies.append(elem.text)
+        except:
+            companyelem = []
+
+        try:
+            locaelem = browser.find_elements(By.CSS_SELECTOR, 'span.job-search-card__location')
+
+            for elem in locaelem:
+                self.locations.append(elem.text)
+        except:
+            locaelem = []
+
+        try:
+            urlelem = browser.find_elements(By.CSS_SELECTOR, 'a.base-card__full-link')
+
+            for u in urlelem:
+                self.urls.append(u.get_attribute('href'))
+        except:
+            urlelem = []
+
+        unique_jobs = []
+        
+        for t, c, u, l in zip(self.titles, self.companies, self.urls, self.locations):
+            job_id = f"{self.normalize(t)}_{self.normalize(c)}_{self.normalize(l)}"
+            if job_id not in seen_jobs:
+                seen_jobs.add(job_id)
+                unique_jobs.append((t, c, l, u))
+
+            # Update lists with unique jobs only
+            
+            self.titles = [job[0] for job in unique_jobs]
+            self.companies = [job[1] for job in unique_jobs]
+            self.locations = [job[2] for job in unique_jobs]
+            self.urls = [job[3] for job in unique_jobs]
+
+    def jd_extraction(self):
+        browser = webdriver.Firefox(options=options)
+        for u in self.urls:
+        
+            try:
+                browser.get(u)
+                time.sleep(np.random.uniform(3, 5))
+                for i in range(2):
+                    browser.find_element(By.TAG_NAME, 'body').send_keys(Keys.ESCAPE)
+                # we have to click show more to load the full description
+                def scroll_and_click_show_more(browser, max_scrolls=50):
+                        """Scroll down until 'Show more' button is visible and click it"""
+                        for i in range(max_scrolls):
+                                try:
+                                # Try to find the button
+                                        button = browser.find_element(By.CSS_SELECTOR, "button[data-tracking-control-name='public_jobs_show-more-html-btn']")
+                                            
+                                # Check if button is visible
+                                        if button.is_displayed():
+                                                print(f"'Show more' button found after {i} scrolls")
+                                                
+                                # Scroll to the button to ensure it's in view
+                                        browser.execute_script("arguments[0].scrollIntoView({block: 'center'});", button)
+                                        time.sleep(0.5)
+                                                
+                                # Click the button
+                                        button.click()
+                                        print("'Show more' button clicked")
+                                        time.sleep(1)
+                                        return True
+                                                
+                                except NoSuchElementException:
+                                        pass
+                                        
+                                # Scroll down
+                                browser.execute_script("window.scrollBy(0, 800);")
+                                time.sleep(np.random.uniform(0.3, 0.8))
+
+                                
+                                    
+                                print("Max scrolls reached, 'Show more' button not found")
+                                return False
+                scroll_and_click_show_more(browser)
+                descelem = browser.find_elements(By.CSS_SELECTOR, 'div.show-more-less-html__markup.relative.overflow-hidden')
+                cleaned_desc = self.clean_text(descelem[0].text)
+                self.job_description.append(cleaned_desc)
+                skills = self._extract_skills(cleaned_desc)
+                self.job_skills.append(skills)
+
+                degree = self._extract_degree(cleaned_desc)
+                self.degree.append(degree)
+                health_ins = self._extract_job_health_insurance_info(cleaned_desc)
+                self.health_insurance.append(health_ins)
+
+                remote = self._extract_job_work_from_home(cleaned_desc)
+                self.work_from_home.append(remote)
+        
+
+                try:
+                    sal = browser.find_element(By.CSS_SELECTOR, "div.salary.compensation__salary")
+                    sal_text = sal.text
+                    print(sal_text)
+                    self.salary.append(sal_text)
+                    s_rate = self._salary_rate(sal_text)
+                    self.salary_rate.append(s_rate)
+                except:
+                    self.salary.append("Competitive Salary")
+                    self.salary_rate.append("yearly")
+
+                try:
+                    schedule = browser.find_elements(By.CSS_SELECTOR, "span.description__job-criteria-text.description__job-criteria-text--criteria")
+                    schedule_text = schedule[1].text
+                    print(schedule_text)
+                    self.schedule.append(schedule_text)
+                except:
+                    self.schedule.append("Full-time")
+ 
+                
+            except:
+                print(f"Failed to load job description for {u}")
+                self.job_description.append("Description not available")
+                self.job_skills.append("N/A")
+
+        browser.quit()
+
+    def _save_to_csv(self):
+        import csv
+        try:
+            with open(self.output_filename + '.csv', 'w', newline='', encoding='utf-8-sig') as f:
+                writer = csv.writer(f)
+                writer.writerow(['Title', 'Title_Short' 'Company', 'Location', 'URL', 'Job Description', 'Skills', 'Salary', 'Job_Health_Insurance', 'Degree', 'Remote Work', 'Job_via', 'Job_Schedule', 'Salary_rate', 'City'])
+                for title, title_short, company, loca, u, desc, skills, salary, hinsurance, degree, remote, schedule, rate in zip(self.titles, self.job_title_short, self.companies, self.locations, self.urls, self.job_description, self.job_skills, self.salary, self.health_insurance, self.degree, self.work_from_home, self.schedule, self.salary_rate):
+                    writer.writerow([
+                        title.strip(),
+                        title_short.strip(),
+                        company.strip(),
+                        loca.strip(),
+                        u.strip(),
+                        desc.strip(),
+                        skills.strip(),
+                        salary.strip(),
+                        hinsurance.strip(),
+                        degree.strip(),
+                        remote.strip(),
+                        'LinkedIn',
+                        schedule.strip(),
+                        rate.strip(),
+                        'London'
+                    ])
+            print(f"Saved to {self.output_filename}")
+        except Exception as e:
+            print(f'Error saving to csv: {e}')
+
+    def _save_to_json(self):
+        data = []
+        json_filename = self.output_filename + '.json'
+        for title, title_short, company, loca, u, desc, skills, salary, hinsurance, degree, remote, schedule, rate in zip(self.titles, self.job_title_short, self.companies, self.locations, self.urls, self.job_description, self.job_skills, self.salary, self.health_insurance, self.degree, self.work_from_home, self.schedule, self.salary_rate):
+            data.append({
+                'title': title.strip(),
+                'title_short': title_short.strip(),
+                'company': company.strip(),
+                'locations': loca.strip(),
+                'job_url': u.strip(),
+                'job_description': desc.strip(),
+                'skills': skills.strip(),
+                'salary': salary.strip(),
+                'health_insurancce': hinsurance.strip(),
+                'degree': degree.strip(),
+                'work_from_home': remote.strip(),
+                'job_via': 'LinkedIn',
+                'schedule': schedule.strip(),
+                'salary_rate': rate.strip(),
+                'city': 'London'
+                
+            })
+        
+        with open(json_filename, 'w') as f:
+            json.dump(data, f, indent=4)
+        print(f"Saved to {json_filename}")
+
+    def _send_to_pipeline(self):
+            webhook_url = "https://primary-production-dacdb.up.railway.app/webhook/linkedin"
+            all_jobs=[]
+            for item in zip(self.titles, self.companies, self.locations, self.urls, 
+                            self.job_skills, self.salary, self.work_from_home, self.schedule):
+                title, company, loca, u, skills, salary, remote, schedule = item
+                job = {
+                    "job_title": title.strip(),
+                    "company": company.strip(),
+                    "location": loca.strip(),
+                    "job_url": u.strip(),
+                    "skills": skills.strip(),
+                    "salary": salary.strip(),
+                    "work_from_home": remote.strip(),
+                    "schedule": schedule.strip(),
+                    "job_via": "LinkedIn",
+                    "city": "London"
+                }
+                all_jobs.append(job)
+            try:
+                payload = {"jobs": all_jobs}
+                response = requests.post(webhook_url, json=payload, timeout=10)
+                response.raise_for_status()
+                print(f"✓ Sent: {len(all_jobs)} at {company.strip()}")
+            except requests.exceptions.RequestException as e:
+                print(f"✗ Failed to send batch: {e}")
+
+    def _save_to_excel(self):
+        excel_filename = self.output_filename + '.xlsx'
+        
+        new_df = pd.DataFrame({
+            'Title': [title.strip() for title in self.titles],
+            'Title_Short':[st.strip() for st in self.job_title_short],
+            'Company': [company.strip() for company in self.companies],
+            'Location': [loca.strip() for loca in self.locations],
+            'URL': [url.strip() for url in self.urls],
+            'Job Description': [desc.strip() for desc in self.job_description],
+            'Skills': [skills.strip() for skills in self.job_skills],
+            'Salary': [sal.strip() for sal in self.salary],
+            'Job_Health_Insurance': [j.strip() for j in self.health_insurance],
+            'Degree': [d.strip() for d in self.degree],
+            'Remote Work': [r.strip() for r in self.work_from_home],
+            'Job_via': 'LinkedIn',
+            'Job_Schedule': [js.strip() for js in self.schedule],
+            'Salary_rate': [rate.strip() for rate in self.salary_rate],
+            'City': 'London'
+        })
+        
+        
+        if os.path.exists(excel_filename):
+            existing_df = pd.read_excel(excel_filename, engine='openpyxl')
+            combined_df = pd.concat([existing_df, new_df], ignore_index=True)
+            combined_df = combined_df.drop_duplicates(subset=['Title', 'Company'], keep='first')
+            combined_df.to_excel(excel_filename, index=False, engine='openpyxl')
+            print(f'Appended to {excel_filename}. Total jobs: {len(combined_df)}')
+        else:
+            new_df.to_excel(excel_filename, index=False, engine='openpyxl')
+            print(f'Created {excel_filename} with {len(new_df)} jobs')
+
+        
+if __name__ == '__main__':
+    parser = argparse.ArgumentParser(description='Scraper CLI')
+
+    parser.add_argument('--filename', default='jobs', help='Name of the output file without any extensions')
+    parser.add_argument('--job_keyword', nargs='+', required=True, help='Enter the job keyword you want to search within quotes')
+    parser.add_argument('--format', choices=['csv', 'json', 'excel', 'pandas', 'all'], default='all', help='Output format')
+    args = parser.parse_args()
+    scraper = LinkedInScraper(output_filename=args.filename, format=args.format)
+    job_keyword = ' '.join(args.job_keyword)
+    scraper.scrape_jobs(job_keyword=job_keyword)
+
+    
+
+    scraper.jd_extraction()
+    scraper._shortening_titles()
+    
+    if args.format == 'csv':
+        scraper._save_to_csv()
+    elif args.format == 'json':
+        scraper._save_to_json()
+    elif args.format == 'excel':
+        scraper._save_to_excel()
+    elif args.format == 'pandas':
+        scraper._save_to_csv()
+        scraper._save_to_json()
+    else:  # 'all'
+        scraper._save_to_csv()
+        scraper._save_to_json()
+        scraper._save_to_excel()
+        scraper._send_to_pipeline()
+
+    print(f"\nScraping complete! Found {len(scraper.titles)} jobs.")
+
+
+# <div class="show-more-less-html__markup relative overflow-hidden">
+
